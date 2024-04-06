@@ -290,7 +290,7 @@ void delay_ms(uint32_t ms) {
 	while (CalculatorTime(startTime, GetMilSecTick()) <= ms)
 		;
 
-//	Đợi cho đến khi hết khoảng time cài đặt
+//	Đợi cho đến  khi hết khoảng time cài đặt
 
 }
 
