@@ -10,7 +10,12 @@
 #include <stm32f401re_gpio.h>
 #include <stm32f401re_rcc.h>
 #include <stdio.h>
-
+#include "stm32f401re_rcc.h"
+#include "stm32f401re_gpio.h"
+#include "stm32f401re_adc.h"
+#include "stm32f401re_dma.h"
+#include "stm32f401re_usart.h"
+#include "timer.h"
 /***********************************************************************************/
 #define CYCLE_SEND_DATA_1 1000 // ms
 
@@ -65,7 +70,7 @@
 // Define GPIO PIN
 #define LED_GPIO_PORT						GPIOA
 #define LED_GPIO_PIN						GPIO_Pin_5
-#define LED_PIN							5
+#define LED_PIN								5
 #define LEDControl_SetClock					RCC_AHB1Periph_GPIOA
 
 // Define GPIO PIN
@@ -101,8 +106,27 @@
 #define BUTTON_GPIO_PIN2					GPIO_Pin_0
 #define BUTTONControl_SetClock2				RCC_AHB1Periph_GPIOB
 
+#define ADC_PORT				    GPIOC
+#define ADC_PIN             	    GPIO_Pin_5
+
+#define ADCx_SENSOR                	ADC1
+#define ADCx_CLK                 	RCC_APB2Periph_ADC1
+#define DMA_CHANNELx             	DMA_Channel_0
+#define DMA_STREAMx              	DMA2_Stream0
+#define ADCx_DR_ADDRESS          	((uint32_t)0x4001204C)
 
 /*Privated Function ************************************************************/
+
+static __IO uint16_t uhADCConvertedValue = 0;
+uint16_t Light;
+
+static void AppInitCommon(void);
+void LightSensor_Init1(void);
+static void USART1_Init(void);
+uint16_t Read_ADC_Light(void);
+static void MultiSensorScan(void);
+uint16_t LightSensor_MeasureUseDMA(void);
+
 static void AppCommon();
 static void SPI1_Init(void);
 
@@ -135,6 +159,7 @@ static char src1[20] = "";
 static char src2[20] = "";
 static char src3[20] = "";
 static char src4[20] = "";
+static char src4_light[20] = "";
 static uint32_t time_total;
 static uint8_t temperature, humidity;
 static uint8_t temperature1, humidity1;
@@ -227,7 +252,7 @@ int main(void)
 	Led_init();
 	button_Init();
 	//led sang 2 lan khi nhap code
-	ledControlSetStatus(LED_GPIO_PORT, LED_PIN, 0);
+	//ledControlSetStatus(LED_GPIO_PORT, LED_PIN, 0);
 	ledControlSetStatus(LED_GPIO_PORT, LED_PIN, 1);
 	delay();
 	ledControlSetStatus(LED_GPIO_PORT, LED_PIN, 0);
@@ -274,6 +299,8 @@ int main(void)
 
 		processGetValueSensor();
 		processTimerScheduler();
+		MultiSensorScan();
+
 	}
 
 }
@@ -332,6 +359,8 @@ static void AppCommon()
     ucg_SetRotate180(&ucg);
     Scan_TimeSensor(5000);
     time_initial = GetMilSecTick();
+
+    LightSensor_Init1();
 }
 
 /**
@@ -673,6 +702,10 @@ void Scan_SensorLCD(void)
 	memset(src4, 0, sizeof(src4));
 	sprintf(src4, " Humi = %3d %%   ", humidity);
 	ucg_DrawString(&ucg, 0, 72, 0, src4);
+
+	memset(src4_light, 0, sizeof(src4_light));
+	sprintf(src4_light, " Light = %3d    ", Light);
+	ucg_DrawString(&ucg, 0, 92, 0, src4_light);
 }
 /**
 * @func 	Scan_1s
@@ -754,3 +787,148 @@ static void button_Init(void) {
 	GPIO_Init(BUTTON_GPIO_PORT, &GPIO_InitStructure);
 }
 
+uint16_t Read_ADC_Light(void)
+{
+	uint32_t result;
+	// Start ADCx software conversion
+	ADC_SoftwareStartConv(ADC1);
+
+	// Wait for ADC conversion complete
+	while (ADC_GetFlagStatus(ADC1, ADC_FLAG_EOC)) {};
+
+	// Read value
+	result = ADC_GetConversionValue(ADC1);
+
+	return result;
+}
+
+/**
+ * @func   multiSensorScan
+ * @brief  scan multiple sensor
+ * @param  None
+ * @retval None
+ */
+static void
+MultiSensorScan(void)
+{
+	uint32_t dwTimeCurrent;
+	static uint32_t dwTimeTotal, dwTimeInit;
+
+	dwTimeCurrent = GetMilSecTick();
+
+	if (dwTimeCurrent >= dwTimeInit)
+	{
+		dwTimeTotal += dwTimeCurrent - dwTimeInit;
+	}
+	else
+	{
+		dwTimeTotal += 0xFFFFFFFFU - dwTimeCurrent + dwTimeInit;
+	}
+
+	if (dwTimeTotal >= 1000)
+	{
+		// Time scan 1s------------------------------------------------------
+		dwTimeTotal = 0;
+		Light = LightSensor_MeasureUseDMA();
+		memset(src4_light, 0, sizeof(src4_light));
+		sprintf(src4_light, " Light = %3d    ", Light);
+		ucg_DrawString(&ucg, 0, 92, 0, src4_light);
+	}
+
+	dwTimeInit = dwTimeCurrent;
+}
+
+/**
+ * @func   LightSensor_MeasureUseDMAMode
+ * @brief  Measure value ADC in mode DMA
+ * @param  None
+ * @retval Value of ADC
+ */
+uint16_t
+LightSensor_MeasureUseDMA(void) {
+	return uhADCConvertedValue;
+}
+
+/**
+ * @func   Read ADC1
+ * @brief  Initializes Read Temperature
+ * @param  None
+ * @retval None
+ */
+void LightSensor_Init1(void)
+{
+	ADC_InitTypeDef       ADC_InitStructure;
+	ADC_CommonInitTypeDef ADC_CommonInitStructure;
+	DMA_InitTypeDef       DMA_InitStructure;
+
+	/* Enable peripheral clocks *************************************************/
+	RCC_AHB1PeriphClockCmd(RCC_AHB1Periph_DMA2, ENABLE);
+	RCC_APB2PeriphClockCmd(ADCx_CLK, ENABLE);
+
+	GPIO_InitTypeDef GPIO_InitStructure;
+
+	/* GPIOA, GPIOB and GPIOE Clocks enable */
+	RCC_AHB1PeriphClockCmd(RCC_AHB1Periph_GPIOC, ENABLE);
+
+	GPIO_InitStructure.GPIO_Pin = ADC_PIN;
+	GPIO_InitStructure.GPIO_Mode = GPIO_Mode_AN;
+	GPIO_InitStructure.GPIO_PuPd = GPIO_PuPd_NOPULL;
+	GPIO_Init(ADC_PORT, &GPIO_InitStructure);
+
+	/* ADC Deinitialization *****************************************************/
+	ADC_DeInit();
+
+	/* ADC Common Init **********************************************************/
+	ADC_CommonInitStructure.ADC_Mode = ADC_Mode_Independent;
+	ADC_CommonInitStructure.ADC_Prescaler = ADC_Prescaler_Div2;
+	ADC_CommonInitStructure.ADC_DMAAccessMode = ADC_DMAAccessMode_Disabled;
+	ADC_CommonInitStructure.ADC_TwoSamplingDelay = ADC_TwoSamplingDelay_5Cycles;
+	ADC_CommonInit(&ADC_CommonInitStructure);
+
+	/* ADC1 Init ****************************************************************/
+	ADC_InitStructure.ADC_Resolution = ADC_Resolution_12b;
+	ADC_InitStructure.ADC_ScanConvMode = DISABLE;
+	ADC_InitStructure.ADC_ContinuousConvMode = ENABLE;
+	ADC_InitStructure.ADC_ExternalTrigConvEdge = ADC_ExternalTrigConvEdge_None;
+	ADC_InitStructure.ADC_ExternalTrigConv = ADC_ExternalTrigConv_T1_CC1;
+	ADC_InitStructure.ADC_DataAlign = ADC_DataAlign_Right;
+	ADC_InitStructure.ADC_NbrOfConversion = 1;
+	ADC_Init(ADCx_SENSOR, &ADC_InitStructure);
+
+		/* DMA2_Stream0 channel0 configuration **************************************/
+	DMA_DeInit(DMA2_Stream0);
+	DMA_InitStructure.DMA_Channel = DMA_CHANNELx;
+	DMA_InitStructure.DMA_PeripheralBaseAddr = (uint32_t)ADCx_DR_ADDRESS;
+	DMA_InitStructure.DMA_Memory0BaseAddr = (uint32_t)&uhADCConvertedValue;
+	DMA_InitStructure.DMA_DIR = DMA_DIR_PeripheralToMemory;
+	DMA_InitStructure.DMA_BufferSize = 1;
+	DMA_InitStructure.DMA_PeripheralInc = DMA_PeripheralInc_Disable;
+	DMA_InitStructure.DMA_MemoryInc = DMA_MemoryInc_Disable;
+	DMA_InitStructure.DMA_PeripheralDataSize = DMA_PeripheralDataSize_HalfWord;
+	DMA_InitStructure.DMA_MemoryDataSize = DMA_MemoryDataSize_HalfWord;
+	DMA_InitStructure.DMA_Mode = DMA_Mode_Circular;
+	DMA_InitStructure.DMA_Priority = DMA_Priority_High;
+	DMA_InitStructure.DMA_FIFOMode = DMA_FIFOMode_Disable;
+	DMA_InitStructure.DMA_FIFOThreshold = DMA_FIFOThreshold_HalfFull;
+	DMA_InitStructure.DMA_MemoryBurst = DMA_MemoryBurst_Single;
+	DMA_InitStructure.DMA_PeripheralBurst = DMA_PeripheralBurst_Single;
+	DMA_Init(DMA_STREAMx, &DMA_InitStructure);
+
+		/* DMA2_Stream0 enable */
+	DMA_Cmd(DMA_STREAMx, ENABLE);
+
+		/* Enable DMA request after last transfer (Single-ADC mode) */
+	ADC_DMARequestAfterLastTransferCmd(ADCx_SENSOR, ENABLE);
+
+		/* Enable ADC1 DMA */
+	ADC_DMACmd(ADCx_SENSOR, ENABLE);
+
+	/* ADC1 regular channel15 configuration *************************************/
+	ADC_RegularChannelConfig(ADC1, ADC_Channel_15, 1, ADC_SampleTime_15Cycles);
+
+	/* Enable ADC1 */
+	ADC_Cmd(ADC1, ENABLE);
+
+	/* Start ADC1 Software Conversion */
+	ADC_SoftwareStartConv(ADC1);
+}
